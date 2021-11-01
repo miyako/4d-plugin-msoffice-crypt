@@ -1,0 +1,16 @@
+{
+    "name": "msoffice crypt",
+    "id": 20000,
+    "commands": [
+        {
+            "theme": "msoffice crypt",
+            "syntax": "msoffice encrypt(&O;&J):J",
+            "threadSafe": true
+        },
+        {
+            "theme": "msoffice crypt",
+            "syntax": "msoffice decrypt(&O;&J):J",
+            "threadSafe": true
+        }
+    ]
+}
