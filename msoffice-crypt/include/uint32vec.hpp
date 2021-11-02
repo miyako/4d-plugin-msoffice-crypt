@@ -12,7 +12,11 @@
 	#ifdef __linux__
 		#include <x86intrin.h>
 	#else
-		#include <emmintrin.h>
+#ifdef __x86_64__
+        #include <emmintrin.h>
+#else
+        #include "SSE2NEON.h"
+#endif
 	#endif
 #endif
 
@@ -139,15 +143,18 @@ struct Uint32VecT<4> {
 	}
 };
 
+#ifdef __aarch64__
+#else
 inline Uint32VecT<4> operator<<(const Uint32VecT<4>& a, const int n)
 {
 	return _mm_slli_epi32(a.x_, n);
 }
+
 inline Uint32VecT<4> operator>>(const Uint32VecT<4>& a, const int n)
 {
 	return _mm_srli_epi32(a.x_, n);
 }
-
+#endif
 inline Uint32VecT<4> operator+(const Uint32VecT<4>& a, const Uint32VecT<4>& b)
 {
 	return _mm_add_epi32(a.x_, b.x_);

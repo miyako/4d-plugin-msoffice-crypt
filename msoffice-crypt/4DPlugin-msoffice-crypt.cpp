@@ -82,10 +82,12 @@ static void msoffice_crypt(PA_PluginParameters params, int enc) {
     
     cybozu::String16 wpass;
     std::string secretKey;
+    /*
     bool putSecretKey = false;
     bool putEncryptionInfo = false;
     bool debug2 = false;
     bool debug3 = false;
+     */
     int encMode = 0;
     int spinCount = 0;
 
