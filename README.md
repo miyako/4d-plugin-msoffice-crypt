@@ -1,5 +1,5 @@
 ![version](https://img.shields.io/badge/version-17%2B-3E8B93)
-![platform](https://img.shields.io/static/v1?label=platform&message=mac-intel%20|%20win-64&color=blue)
+![platform](https://img.shields.io/static/v1?label=platform&message=mac-intel%20|%20mac-arm%20|%20win-64&color=blue)
 ![downloads](https://img.shields.io/github/downloads/miyako/4d-plugin-msoffice-crypt/total)
 
 # 4d-plugin-msoffice-crypt
@@ -7,13 +7,26 @@ Tool to encrypt or decrypt OOXML documents.
 
 Based on [herumi/msoffice](https://github.com/herumi/msoffice).
 
-**Note**: macOS is Intel only; Xcode 12 clang fails to compile certain buitin ARM calls (maybe fixed in 13).
+**Note**: The original source code links to a library that uses [Intel Intrinsics](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html). In particular, the file `uint32vec.hpp` goes like
 
-```sh
-use of undeclared identifier '__builtin_ia32_emms'; did you mean
-      '__builtin_isless'?
-    __builtin_ia32_emms();
+```c
+#ifdef _WIN32
+	#include <winsock2.h>
+	#include <intrin.h>
+#else
+	#ifdef __linux__
+		#include <x86intrin.h>
+	#else
+#ifdef __x86_64__
+        #include <emmintrin.h>
+#endif
+	#endif
+#endif
 ```
+
+meaning all non-Windows, non-Linux platform (i.e. macOS) defaults to Intel.
+
+Thanks to [jratcliff63367/sse2neon](https://github.com/jratcliff63367/sse2neon) we can port such code to Apple Silicon.
 
 ## Usage
 
