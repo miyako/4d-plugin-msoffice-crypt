@@ -27,7 +27,7 @@ Based on [herumi/msoffice](https://github.com/herumi/msoffice).
 
 meaning all non-Windows, non-Linux platform (i.e. macOS) defaults to Intel.
 
-Thanks to [jratcliff63367/sse2neon](https://github.com/jratcliff63367/sse2neon) we can port such code to Apple Silicon.
+Thanks to ~~[jratcliff63367/sse2neon]~~[https://github.com/DLTcollab/sse2neon](https://github.com/jratcliff63367/sse2neon) we can port such code to Apple Silicon.
 
 ## Usage
 
