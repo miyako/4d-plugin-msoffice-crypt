@@ -1,9 +1,9 @@
 //%attributes = {}
 $XLSX:=Folder:C1567(fk resources folder:K87:11).file("unprotected.xlsx").getContent()
 
-$params:=New object:C1471("password";"1234";"secret";"abcd")
+$params:=New object:C1471("password"; "1234"; "secret"; "abcd")
 
-$status:=msoffice encrypt ($XLSX;$params)
+$status:=msoffice encrypt($XLSX; $params)
 
 If ($status.success)
 	
@@ -13,9 +13,9 @@ End if
 
 $XLSX:=Folder:C1567(fk resources folder:K87:11).file("protected.xlsx").getContent()
 
-$params:=New object:C1471("password";"1234";"secret";"abcd")
+$params:=New object:C1471("password"; "1234"; "secret"; "abcd")
 
-$status:=msoffice decrypt ($XLSX;$params)
+$status:=msoffice decrypt($XLSX; $params)
 
 If ($status.success)
 	
