@@ -113,34 +113,48 @@ static void msoffice_crypt(PA_PluginParameters params, int enc) {
          
          */
         
-        CUTF16String password;
-        if(ob_get_a(options,L"password", &password)){
-            wpass = (const cybozu::Char16 *)password.c_str();
-        }
-        
-        CUTF8String password_hex;
-        if(ob_get_s(options,L"password_hex", &password_hex)){
-            wpass = cybozu::ToUtf16(ms::fromHex((const char *)password_hex.c_str()));
-        }
-        
-        CUTF8String password_uni;
-        if(ob_get_s(options,L"password_uni", &password_uni)){
-            wpass = fromUniHex((const char *)password_uni.c_str());
-        }
-        
-        CUTF8String secret;
-        if(ob_get_s(options,L"secret", &secret)){
-            secretKey = (const char *)secret.c_str();
-        }
-        
-        CUTF8String secret_hex;
-        if(ob_get_s(options,L"secret_hex", &secret_hex)){
-            secretKey = ms::fromHex((const char *)secret_hex.c_str(), true);
-        }
-        
-        CUTF8String secret_uni;
-        if(ob_get_s(options,L"secret_uni", &secret_uni)){
-            secretKey = cybozu::ToUtf8(fromUniHex((const char *)secret_uni.c_str()));
+        // fromUniHex()/ms::fromHex() below throw on malformed input (e.g. an odd
+        // hex length, or a *_uni string that isn't a well-formed "uXXXX" run) --
+        // directly reachable from an ordinary New object(...) call the caller
+        // controls. Both commands declare a return value in manifest.json, so an
+        // uncaught exception here would otherwise leave the 4D host waiting on a
+        // result that never arrives; catch locally and report it on status instead.
+        try {
+            
+            // precedence, as documented above: password > password_hex > password_uni
+            CUTF16String password;
+            CUTF8String password_hex;
+            CUTF8String password_uni;
+            if(ob_get_a(options,L"password", &password)){
+                wpass = (const cybozu::Char16 *)password.c_str();
+            } else if(ob_get_s(options,L"password_hex", &password_hex)){
+                wpass = cybozu::ToUtf16(ms::fromHex((const char *)password_hex.c_str()));
+            } else if(ob_get_s(options,L"password_uni", &password_uni)){
+                wpass = fromUniHex((const char *)password_uni.c_str());
+            }
+            
+            // precedence, as documented above: secret > secret_hex > secret_uni
+            CUTF8String secret;
+            CUTF8String secret_hex;
+            CUTF8String secret_uni;
+            if(ob_get_s(options,L"secret", &secret)){
+                secretKey = (const char *)secret.c_str();
+            } else if(ob_get_s(options,L"secret_hex", &secret_hex)){
+                secretKey = ms::fromHex((const char *)secret_hex.c_str(), true);
+            } else if(ob_get_s(options,L"secret_uni", &secret_uni)){
+                secretKey = cybozu::ToUtf8(fromUniHex((const char *)secret_uni.c_str()));
+            }
+            
+        } catch (std::exception& e) {
+            ob_set_b(status, L"success", false);
+            ob_set_s(status, L"error", e.what());
+            PA_ReturnObject(params, status);
+            return;
+        } catch (...) {
+            ob_set_b(status, L"success", false);
+            ob_set_s(status, L"error", "invalid password/secret option");
+            PA_ReturnObject(params, status);
+            return;
         }
         
         switch ((int)ob_get_n(options, L"mode")) {
@@ -190,7 +204,7 @@ static void msoffice_crypt(PA_PluginParameters params, int enc) {
      }
      */
 
-    ms::Format format;
+    ms::Format format = ms::fUnknown;
     
     try {
         format = ms::DetectFormat((const char *)Param1.getBytesPtr(), Param1.getBytesLength());
@@ -200,57 +214,73 @@ static void msoffice_crypt(PA_PluginParameters params, int enc) {
         ob_set_s(status, L"error", e.what());
     }
     
-    if (!passData.empty()) {
-        
-        if(enc == 1) {
+    // Everything below can throw (bad hex/uni-hex input already parsed above the
+    // outer boundary, plus whatever ms::encode/ms::decode may throw internally).
+    // Both commands are declared with a return value in manifest.json (":J"), so
+    // an exception that escapes this function without reaching PA_ReturnObject
+    // leaves the 4D host waiting on a return that never arrives (a freeze, not
+    // just a lost result) -- PluginMain's outer catch(...) swallows the exception
+    // but has no status object to return. Catch locally instead so status is
+    // always returned.
+    try {
+        if (!passData.empty()) {
             
-            if (format == ms::fCfb) {
-                ob_set_s(status, L"warning", "already encrypted");
+            if(enc == 1) {
+                
+                if (format == ms::fCfb) {
+                    ob_set_s(status, L"warning", "already encrypted");
+                }
+                
+                bool isOffice2013 = encMode == 1;
+                ob_set_b(status, L"isOffice2013", isOffice2013);
+                
+                std::string encData;
+                
+                bool success = ms::encode((const char *)Param1.getBytesPtr(),
+                                          Param1.getBytesLength(),
+                                          outFile,
+                    encData,
+                                          passData,
+                                          isOffice2013,
+                                          secretKey,
+                                          spinCount);
+                
+                ob_set_b(status, L"success", success);
+                
+                if(success) {
+                    PA_SetBlobParameter(params, 1, (void *)encData.data(), (PA_long32)encData.size());
+                }
+                
             }
             
-            bool isOffice2013 = encMode == 1;
-            ob_set_b(status, L"isOffice2013", isOffice2013);
-            
-            std::string encData;
-            
-            bool success = ms::encode((const char *)Param1.getBytesPtr(),
-                                      Param1.getBytesLength(),
-                                      outFile,
-				encData,
-                                      passData,
-                                      isOffice2013,
-                                      secretKey,
-                                      spinCount);
-            
-            ob_set_b(status, L"success", success);
-            
-            if(success) {
-				PA_SetBlobParameter(params, 1, (void *)encData.data(), (PA_long32)encData.size());
+            if(enc == 0) {
+                
+                if (format == ms::fZip) {
+                    ob_set_s(status, L"warning", "already decrypted");
+                }
+                
+                std::string decData;
+                bool success = ms::decode((const char *)Param1.getBytesPtr(),
+                                          Param1.getBytesLength(),
+                                          outFile,
+                                          decData,
+                                          passData,
+                                          secretKey,
+                                          false);
+                
+                ob_set_b(status, L"success", success);
+                
+                if(success) {
+                    PA_SetBlobParameter(params, 1, (void *)decData.data(), (PA_long32)decData.size());
+                }
             }
-            
         }
-        
-        if(enc == 0) {
-            
-            if (format == ms::fZip) {
-                ob_set_s(status, L"warning", "already decrypted");
-            }
-            
-			std::string decData;
-            bool success = ms::decode((const char *)Param1.getBytesPtr(),
-                                      Param1.getBytesLength(),
-										outFile,
-                                      decData,
-                                      passData,
-                                      secretKey,
-                                      false);
-            
-            ob_set_b(status, L"success", success);
-            
-            if(success) {
-				PA_SetBlobParameter(params, 1, (void *)decData.data(), (PA_long32)decData.size());
-            }
-        }
+    } catch (std::exception& e) {
+        ob_set_b(status, L"success", false);
+        ob_set_s(status, L"error", e.what());
+    } catch (...) {
+        ob_set_b(status, L"success", false);
+        ob_set_s(status, L"error", "unknown error");
     }
     
     PA_ReturnObject(params, status);
