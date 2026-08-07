@@ -122,14 +122,19 @@ static void msoffice_crypt(PA_PluginParameters params, int enc) {
         try {
             
             // precedence, as documented above: password > password_hex > password_uni
-            CUTF16String password;
+            // NOTE: the project's own support/4DPlugin-JSON.h declares only
+            // bool ob_get_a(PA_ObjectRef, const wchar_t*, CUTF8String*) as the
+            // string getter -- there is no ob_get_s, and ob_get_a returns UTF-8
+            // (CUTF8String), not UTF-16. Verified against the real header at the
+            // exact tag (v1.0.3) CI built, per the CI log's checkout step.
+            CUTF8String password;
             CUTF8String password_hex;
             CUTF8String password_uni;
             if(ob_get_a(options,L"password", &password)){
-                wpass = (const cybozu::Char16 *)password.c_str();
-            } else if(ob_get_s(options,L"password_hex", &password_hex)){
+                wpass = cybozu::ToUtf16((const char *)password.c_str());
+            } else if(ob_get_a(options,L"password_hex", &password_hex)){
                 wpass = cybozu::ToUtf16(ms::fromHex((const char *)password_hex.c_str()));
-            } else if(ob_get_s(options,L"password_uni", &password_uni)){
+            } else if(ob_get_a(options,L"password_uni", &password_uni)){
                 wpass = fromUniHex((const char *)password_uni.c_str());
             }
             
@@ -137,11 +142,11 @@ static void msoffice_crypt(PA_PluginParameters params, int enc) {
             CUTF8String secret;
             CUTF8String secret_hex;
             CUTF8String secret_uni;
-            if(ob_get_s(options,L"secret", &secret)){
+            if(ob_get_a(options,L"secret", &secret)){
                 secretKey = (const char *)secret.c_str();
-            } else if(ob_get_s(options,L"secret_hex", &secret_hex)){
+            } else if(ob_get_a(options,L"secret_hex", &secret_hex)){
                 secretKey = ms::fromHex((const char *)secret_hex.c_str(), true);
-            } else if(ob_get_s(options,L"secret_uni", &secret_uni)){
+            } else if(ob_get_a(options,L"secret_uni", &secret_uni)){
                 secretKey = cybozu::ToUtf8(fromUniHex((const char *)secret_uni.c_str()));
             }
             
