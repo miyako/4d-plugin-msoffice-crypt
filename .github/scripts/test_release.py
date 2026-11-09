@@ -1,5 +1,6 @@
 import contextlib
 from io import StringIO
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -39,6 +40,15 @@ METADATA_FIXTURES = {
 
 def not_found():
     return HTTPError("https://api.github.com", 404, "Not Found", {}, None)
+
+
+def api_response(data, status=200):
+    response = StringIO(json.dumps(data))
+    response.status = status
+    return response
+
+
+CREATED_RELEASE = {"id": 123, "tag_name": "v1.0.8", "draft": False, "prerelease": False}
 
 
 class MetadataTests(unittest.TestCase):
@@ -236,19 +246,89 @@ class PublicationTests(unittest.TestCase):
 
     @patch("release.urlopen")
     @patch("release.subprocess.run")
-    def test_only_api_404_allows_publication(self, run, urlopen):
+    def test_authenticated_empty_listing_allows_publication(self, run, urlopen):
         run.return_value.returncode = 2
-        urlopen.side_effect = not_found()
+        urlopen.side_effect = [
+            api_response({"full_name": "example/plugin"}), api_response([]),
+        ]
         release.ensure_available("v1.0.7")
-        self.assertTrue(urlopen.call_args.args[0].full_url.endswith("/releases/tags/v1.0.7"))
-        urlopen.side_effect = None
-        with self.assertRaisesRegex(ValueError, "Release .* already exists"):
-            release.ensure_available("v1.0.7")
-        for error in (HTTPError("url", 403, "Forbidden", {}, None),
-                      HTTPError("url", 500, "Server error", {}, None), URLError("unreachable")):
-            urlopen.side_effect = error
-            with self.subTest(error=error), self.assertRaises((HTTPError, URLError)):
+        self.assertEqual([entry.args[0].full_url for entry in urlopen.call_args_list], [
+            "https://api.github.com/repos/example/plugin",
+            "https://api.github.com/repos/example/plugin/releases?per_page=100&page=1",
+        ])
+        for entry in urlopen.call_args_list:
+            request = entry.args[0]
+            self.assertEqual(request.get_method(), "GET")
+            self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+
+    @patch("release.urlopen")
+    @patch("release.subprocess.run")
+    def test_published_and_draft_collisions_beyond_first_page(self, run, urlopen):
+        run.return_value.returncode = 2
+        for draft in (False, True):
+            with self.subTest(draft=draft):
+                urlopen.side_effect = [
+                    api_response({"full_name": "example/plugin"}),
+                    api_response([{"tag_name": f"v0.0.{i}", "draft": False} for i in range(100)]),
+                    api_response([{"tag_name": "v1.0.7", "draft": draft}]),
+                ]
+                with self.assertRaisesRegex(ValueError, "Release .* already exists"):
+                    release.ensure_available("v1.0.7")
+                self.assertTrue(urlopen.call_args.args[0].full_url.endswith("page=2"))
+
+    @patch("release.urlopen")
+    @patch("release.subprocess.run")
+    def test_all_release_pages_checked_before_absence(self, run, urlopen):
+        run.return_value.returncode = 2
+        urlopen.side_effect = [
+            api_response({"full_name": "example/plugin"}),
+            api_response([{"tag_name": f"v0.0.{i}", "draft": True} for i in range(100)]),
+            api_response([]),
+        ]
+        release.ensure_available("v1.0.7")
+        self.assertEqual(urlopen.call_count, 3)
+
+    @patch("release.urlopen")
+    @patch("release.subprocess.run")
+    def test_api_errors_never_mean_absence(self, run, urlopen):
+        run.return_value.returncode = 2
+        for stage in ("repository", "listing", "later-page"):
+            for error in (not_found(), HTTPError("url", 401, "Unauthorized", {}, None),
+                          HTTPError("url", 403, "Forbidden", {}, None),
+                          HTTPError("url", 500, "Server error", {}, None), URLError("unreachable")):
+                responses = []
+                if stage != "repository":
+                    responses.append(api_response({"full_name": "example/plugin"}))
+                if stage == "later-page":
+                    responses.append(api_response([{"tag_name": "v0.0.1", "draft": True}] * 100))
+                urlopen.side_effect = [*responses, error]
+                with self.subTest(stage=stage, error=error), self.assertRaises((HTTPError, URLError)):
+                    release.ensure_available("v1.0.7")
+
+    @patch("release.urlopen")
+    @patch("release.subprocess.run")
+    def test_malformed_repository_and_listings_fail_closed(self, run, urlopen):
+        run.return_value.returncode = 2
+        for repository in (None, [], {}, {"full_name": "another/repo"}):
+            urlopen.side_effect = [api_response(repository)]
+            with self.subTest(repository=repository), self.assertRaises(ValueError):
                 release.ensure_available("v1.0.7")
+        for listing in (None, {}, [None], [{}], [{"tag_name": 7, "draft": True}],
+                        [{"tag_name": "v1.0.7"}], [{"tag_name": "", "draft": False}],
+                        [{"tag_name": "v1.0.7", "draft": "false"}]):
+            urlopen.side_effect = [
+                api_response({"full_name": "example/plugin"}), api_response(listing),
+            ]
+            with self.subTest(listing=listing), self.assertRaises(ValueError):
+                release.ensure_available("v1.0.7")
+        invalid_json = StringIO("not JSON")
+        invalid_json.status = 200
+        urlopen.side_effect = [api_response({"full_name": "example/plugin"}), invalid_json]
+        with self.assertRaises(ValueError):
+            release.ensure_available("v1.0.7")
+        urlopen.side_effect = [api_response({"full_name": "example/plugin"}, status=202)]
+        with self.assertRaisesRegex(RuntimeError, "Unexpected GitHub API status"):
+            release.ensure_available("v1.0.7")
 
     @patch("release.subprocess.check_output")
     def test_checkout_must_match_selected_sha(self, output):
@@ -272,6 +352,8 @@ class PublicationTests(unittest.TestCase):
         output = stack.enter_context(patch("release.subprocess.check_output"))
         output.return_value = f"{SHA}\trefs/tags/v1.0.8\n"
         run = stack.enter_context(patch("release.subprocess.run"))
+        self.api = stack.enter_context(patch("release.urlopen"))
+        self.api.return_value = api_response(CREATED_RELEASE, status=201)
         return available, output, run
 
     def test_publish_rechecks_then_tags_exact_sha_and_never_clobbers(self):
@@ -282,9 +364,19 @@ class PublicationTests(unittest.TestCase):
             call(["git", "tag", "v1.0.8", SHA], check=True),
             call(["git", "-c", "push.followTags=false", "push", "origin",
                   "refs/tags/v1.0.8:refs/tags/v1.0.8"], check=True),
-            call(["gh", "release", "create", "v1.0.8", "--verify-tag", "--target", SHA,
-                  "--title", "v1.0.8", "--generate-notes", "plugin.zip", "plugin.dmg"], check=True),
+            call(["gh", "release", "upload", "v1.0.8", "plugin.zip", "plugin.dmg",
+                  "--repo", "example/plugin"], check=True),
         ])
+        self.api.assert_called_once()
+        request = self.api.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.github.com/repos/example/plugin/releases")
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(json.loads(request.data), {
+            "tag_name": "v1.0.8", "target_commitish": SHA, "name": "v1.0.8",
+            "draft": False, "prerelease": False, "generate_release_notes": True,
+        })
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+        self.assertEqual(self.api.call_args.kwargs, {"timeout": 30})
 
     def test_publication_rejection_never_tags(self):
         available, _, run = self.publication_context()
@@ -307,6 +399,7 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             release.publish("1.0.8", ["plugin.zip", "plugin.dmg"])
         self.assertEqual(run.call_count, 2)
+        self.api.assert_not_called()
 
     def test_remote_tag_mismatch_never_creates_release(self):
         _, output, run = self.publication_context()
@@ -314,13 +407,97 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not point"):
             release.publish("1.0.8", ["plugin.zip", "plugin.dmg"])
         self.assertEqual(run.call_count, 2)
+        self.api.assert_not_called()
 
     def test_release_creation_failure_is_not_swallowed_or_retried(self):
         _, _, run = self.publication_context()
-        run.side_effect = [None, None, subprocess.CalledProcessError(1, ["gh", "release", "create"])]
-        with self.assertRaises(subprocess.CalledProcessError):
+        for error in (not_found(), HTTPError("url", 422, "Unprocessable", {}, None),
+                      HTTPError("url", 500, "Server error", {}, None), URLError("timed out")):
+            with self.subTest(error=error):
+                run.reset_mock()
+                self.api.reset_mock()
+                self.api.side_effect = error
+                with self.assertRaisesRegex(RuntimeError, "retained; no rollback or retry"):
+                    release.publish("1.0.8", ["plugin.zip", "plugin.dmg"])
+                self.assertEqual(run.call_count, 2)
+                self.api.assert_called_once()
+
+    def test_uncertain_create_response_never_uploads_or_rolls_back(self):
+        _, _, run = self.publication_context()
+        for response in (None, {}, dict(CREATED_RELEASE, id=True),
+                         dict(CREATED_RELEASE, tag_name="v9.0.0"),
+                         dict(CREATED_RELEASE, draft=True), dict(CREATED_RELEASE, prerelease=True)):
+            with self.subTest(response=response):
+                run.reset_mock()
+                self.api.reset_mock()
+                self.api.return_value = api_response(response, status=201)
+                with self.assertRaisesRegex(RuntimeError, "Inspect .* manually"):
+                    release.publish("1.0.8", ["plugin.zip", "plugin.dmg"])
+                self.assertEqual(run.call_count, 2)
+                self.api.assert_called_once()
+        self.api.return_value = api_response(CREATED_RELEASE, status=202)
+        with self.assertRaisesRegex(RuntimeError, "Unexpected GitHub API status"):
+            release.publish("1.0.8", ["plugin.zip", "plugin.dmg"])
+        invalid_json = StringIO("response lost")
+        invalid_json.status = 201
+        self.api.return_value = invalid_json
+        with self.assertRaisesRegex(RuntimeError, "result is uncertain"):
+            release.publish("1.0.8", ["plugin.zip", "plugin.dmg"])
+
+    def test_upload_error_is_not_retried_or_rolled_back(self):
+        _, _, run = self.publication_context()
+        run.side_effect = [None, None, subprocess.CalledProcessError(
+            1, ["gh", "release", "upload"], stderr="connection lost",
+        )]
+        with self.assertRaisesRegex(RuntimeError, "Inspect .* manually"):
             release.publish("1.0.8", ["plugin.zip", "plugin.dmg"])
         self.assertEqual(run.call_count, 3)
+        self.api.assert_called_once()
+        self.assertEqual(run.call_args.args[0], [
+            "gh", "release", "upload", "v1.0.8", "plugin.zip", "plugin.dmg",
+            "--repo", "example/plugin",
+        ])
+
+    def test_partial_upload_failure_keeps_created_release_and_assets(self):
+        _, _, run = self.publication_context()
+        retained = {"tag": False, "release": False, "assets": []}
+
+        def create(request, **kwargs):
+            self.assertEqual(request.get_method(), "POST")
+            self.assertEqual(run.call_count, 2)
+            retained["release"] = True
+            return api_response(CREATED_RELEASE, status=201)
+
+        def command(args, **kwargs):
+            if args[:2] == ["git", "-c"]:
+                retained["tag"] = True
+            if args[:3] == ["gh", "release", "upload"]:
+                retained["assets"].append("plugin.zip")
+                raise subprocess.CalledProcessError(1, args, stderr="second upload failed")
+
+        self.api.side_effect = create
+        run.side_effect = command
+        with self.assertRaisesRegex(RuntimeError, "retained; no rollback or retry"):
+            release.publish("1.0.8", ["plugin.zip", "plugin.dmg"])
+        self.assertEqual(retained, {"tag": True, "release": True, "assets": ["plugin.zip"]})
+        self.assertEqual(run.call_count, 3)
+        self.api.assert_called_once()
+        self.assertNotIn("--clobber", run.call_args.args[0])
+
+    def test_ambiguous_post_keeps_server_created_release_without_retry(self):
+        _, _, run = self.publication_context()
+        retained = []
+
+        def create(request, **kwargs):
+            retained.append(json.loads(request.data))
+            raise URLError("connection lost after server created release")
+
+        self.api.side_effect = create
+        with self.assertRaisesRegex(RuntimeError, "result is uncertain"):
+            release.publish("1.0.8", ["plugin.zip", "plugin.dmg"])
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(run.call_count, 2)
+        self.api.assert_called_once()
 
     @patch("release.ensure_available")
     @patch("release.check_commit", return_value=SHA)
@@ -345,7 +522,9 @@ class PublicationTests(unittest.TestCase):
                 subprocess.run(["git", "remote", "add", "origin", str(remote)], check=True)
                 subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
                                 "commit", "--allow-empty", "--quiet", "-m", "fixture"], check=True)
-                with patch("release.urlopen", side_effect=not_found()):
+                with patch("release.urlopen", side_effect=[
+                    api_response({"full_name": "example/plugin"}), api_response([]),
+                ]):
                     release.ensure_available("v1.0.8")
                 subprocess.run(["git", "tag", "v1.0.8"], check=True)
                 subprocess.run(["git", "push", "--quiet", "origin", "refs/tags/v1.0.8"], check=True)
