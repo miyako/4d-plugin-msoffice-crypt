@@ -4,25 +4,18 @@
 # Release with the zip and dmg attached.
 #
 # NOTE: /test/ path is intentional and static for this project.
-# PORTABILITY: Edit only PRODUCT_NAME below. Everything else derives from it.
+# Version metadata is validated by .github/scripts/release.py for this project.
 # Canonical layout enforced:
 #   test/Plugins/<Product>.bundle/Contents/MacOS/<Product>
 #   test/Plugins/<Product>.bundle/Contents/Windows64/<Product>.4DX
 
-name: Build & Release
+name: Build
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing tag to build (e.g. v2.3.0)
-        required: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   # ---- only this needs editing per-project ----
@@ -33,7 +26,8 @@ env:
   # ---------------------------------------------
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Serialize publication across branches, including identical versions on different SHAs.
+  group: release-publication
   cancel-in-progress: false
 
 jobs:
@@ -44,11 +38,14 @@ jobs:
       tag: ${{ steps.set.outputs.tag }}
       version: ${{ steps.set.outputs.version }}
     steps:
-      - id: set
-        run: |
-          TAG="${{ inputs.tag || github.ref_name }}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: validate metadata and reject existing tags or releases
+        id: set
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/release.py preflight
 
   build-windows:
     name: Build Windows (x64)
@@ -57,7 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ github.sha }}
 
       - name: setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -142,10 +139,12 @@ jobs:
     name: Build macOS, package, sign, notarize & release
     needs: [version, build-windows]
     runs-on: macos-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ github.sha }}
 
       - name: download windows binaries
         uses: actions/download-artifact@v4
@@ -235,6 +234,9 @@ jobs:
           lipo -info "$BIN" | grep -q "arm64"
           lipo -info "$BIN" | grep -q "x86_64"
 
+      - name: verify built bundle version
+        run: python3 .github/scripts/release.py verify-bundle "$BASE_DIR/Plugins/$PRODUCT_NAME.bundle/Contents/Info.plist"
+
       - name: merge Windows binaries into the bundle
         run: |
           set -euo pipefail
@@ -288,19 +290,27 @@ jobs:
           echo "Creating $DMG_PATH"
           hdiutil create -format UDBZ -volname "$PRODUCT" -srcfolder "$BUNDLE_PATH" "$DMG_PATH"
 
-          xcrun notarytool submit "$ZIP_PATH" --keychain-profile "notarytool-profile" --keychain "$KEYCHAIN_PATH" --wait
-          xcrun notarytool submit "$DMG_PATH" --keychain-profile "notarytool-profile" --keychain "$KEYCHAIN_PATH" --wait
+          xcrun notarytool submit "$ZIP_PATH" --keychain-profile "notarytool-profile" --keychain "$KEYCHAIN_PATH" --wait --output-format json > "$RUNNER_TEMP/zip-notary.json"
+          xcrun notarytool submit "$DMG_PATH" --keychain-profile "notarytool-profile" --keychain "$KEYCHAIN_PATH" --wait --output-format json > "$RUNNER_TEMP/dmg-notary.json"
+          for RESULT in "$RUNNER_TEMP/zip-notary.json" "$RUNNER_TEMP/dmg-notary.json"; do
+            python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); status = result["status"]; sys.exit(0 if status == "Accepted" else f"::error::Notarization was not accepted: {status}")' "$RESULT"
+          done
           xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
 
           echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
           echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
           ls -lh "$ZIP_PATH" "$DMG_PATH"
 
-      - name: create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          name: ${{ needs.version.outputs.tag }}
-          files: |
-            ${{ env.ZIP_PATH }}
-            ${{ env.DMG_PATH }}
+      - name: tag selected commit and create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release.py publish "$VERSION" "$ZIP_PATH" "$DMG_PATH"
+          {
+            echo "### Published v${VERSION}"
+            echo "Built, verified, signed and notarized selected commit ${GITHUB_SHA}."
+            echo "Created tag v${VERSION} at that exact commit and uploaded ${ZIP_PATH} and ${DMG_PATH} without replacing existing assets."
+          } >> "$GITHUB_STEP_SUMMARY"

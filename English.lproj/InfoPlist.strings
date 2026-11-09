@@ -1,1 +1,5 @@
-/* Localized versions of Info.plist keys */CFBundleName = "msoffice crypt";CFBundleShortVersionString = "1.0.1";CFBundleGetInfoString = "msoffice crypt version 1.0.1, Copyright 2021 miyako.";
+/* Localized versions of Info.plist keys */
+
+CFBundleName = "msoffice crypt";
+CFBundleShortVersionString = "1.0.7";
+CFBundleGetInfoString = "msoffice crypt version 1.0.7, Copyright 2021 miyako.";
