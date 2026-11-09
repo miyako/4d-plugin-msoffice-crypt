@@ -62,6 +62,22 @@ jobs:
       - name: setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      # OpenSSL is linked statically (vcpkg triplet x64-windows-static, /MT)
+      # so the .4DX imports only system DLLs. See vcpkg.json.
+      - name: cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: vcpkg-x64-windows-static-${{ hashFiles('vcpkg.json') }}
+
+      - name: install static OpenSSL (vcpkg)
+        shell: pwsh
+        env:
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}/vcpkg-cache
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install --triplet x64-windows-static
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: clean stale outputs
         shell: pwsh
         run: |
@@ -107,6 +123,13 @@ jobs:
             Copy-Item $found.FullName $destination -Force
           }
           Get-ChildItem $canonicalDir
+
+      - name: verify windows dependencies
+        shell: pwsh
+        run: |
+          $product = "${{ env.PRODUCT_NAME }}"
+          $base = "${{ env.BASE_DIR }}"
+          ./.github/scripts/verify-windows-deps.ps1 -Dir "$base/Plugins/$product.bundle/Contents/Windows64" -Binary "$product.4DX"
 
       - name: upload windows binaries
         uses: actions/upload-artifact@v4

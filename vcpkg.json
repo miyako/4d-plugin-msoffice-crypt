@@ -1,0 +1,9 @@
+{
+  "name": "msoffice-crypt",
+  "dependencies": [
+    {
+      "name": "openssl",
+      "default-features": false
+    }
+  ]
+}

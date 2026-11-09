@@ -6,11 +6,8 @@
 */
 #if defined(_WIN32) && defined(_MT)
 	#if _MSC_VER >= 1900 // VC2015
-		#ifdef _WIN64
-			#pragma comment(lib, "lib/Windows64/libcrypto.lib")
-		#else
-			#pragma comment(lib, "lib/Windows/libcrypto.lib")
-		#endif
+		// static OpenSSL libcrypto; the project supplies its directory (OpenSSLDir)
+		#pragma comment(lib, "libcrypto.lib")
 //	#elif _MSC_VER == 1800 // VC2013
 	#else
 		#pragma comment(lib, "mt/12/libeay32.lib")
@@ -18,4 +15,6 @@
 	#pragma comment(lib, "advapi32.lib")
 	#pragma comment(lib, "gdi32.lib")
 	#pragma comment(lib, "user32.lib")
+	#pragma comment(lib, "crypt32.lib")
+	#pragma comment(lib, "ws2_32.lib")
 #endif
