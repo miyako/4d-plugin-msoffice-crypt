@@ -5,6 +5,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import call, patch
@@ -21,6 +22,19 @@ API_ENV = {
     "GH_TOKEN": "test-token",
     "GITHUB_SHA": SHA,
 }
+METADATA_FIXTURES = {
+    release.PROJECT: "\n".join(
+        f"config{index} = {{ buildSettings = {{ "
+        "MARKETING_VERSION = 1.0.7; CURRENT_PROJECT_VERSION = 1.0.7; }; };"
+        for index in range(6)
+    ).encode(),
+    release.PLIST: plistlib.dumps({"CFBundleShortVersionString": "1.0.7"}),
+    release.LOCALIZED: (
+        'CFBundleName = "msoffice crypt";\n'
+        'CFBundleShortVersionString = "1.0.7";\n'
+        'CFBundleGetInfoString = "msoffice crypt version 1.0.7, Copyright 2021 miyako.";\n'
+    ).encode(),
+}
 
 
 def not_found():
@@ -34,9 +48,12 @@ class MetadataTests(unittest.TestCase):
         self.previous = Path.cwd()
         os.chdir(self.temp.name)
         self.addCleanup(os.chdir, self.previous)
-        for path in (release.PROJECT, release.PLIST, release.LOCALIZED):
+        self.reset_metadata()
+
+    def reset_metadata(self, *paths):
+        for path in paths or METADATA_FIXTURES:
             path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ROOT / path, path)
+            path.write_bytes(METADATA_FIXTURES[path])
 
     def replace(self, path, old, new):
         text = path.read_text()
@@ -50,15 +67,14 @@ class MetadataTests(unittest.TestCase):
         with release.PLIST.open("wb") as target:
             plistlib.dump(data, target)
 
-    def test_repository_version_and_no_added_build_key(self):
+    def test_fixture_version_and_no_added_build_key(self):
         self.assertEqual(release.read_version(), "1.0.7")
         self.assertNotIn("CFBundleVersion", plistlib.loads(release.PLIST.read_bytes()))
 
     def test_all_bump_modes_coordinate_every_field(self):
         for mode, expected in (("patch", "1.0.8"), ("minor", "1.1.0"), ("major", "2.0.0")):
             with self.subTest(mode=mode):
-                for path in (release.PROJECT, release.PLIST, release.LOCALIZED):
-                    shutil.copyfile(ROOT / path, path)
+                self.reset_metadata()
                 self.assertEqual(release.bump(mode), expected)
                 self.assertEqual(release.read_version(), expected)
                 for key in release.SETTINGS:
@@ -72,8 +88,7 @@ class MetadataTests(unittest.TestCase):
             data = plistlib.loads(release.PLIST.read_bytes())
             self.assertEqual(data["CFBundleShortVersionString"], reference)
             self.assertEqual(data["CFBundleVersion"], "1.0.8")
-            for path in (release.PROJECT, release.PLIST, release.LOCALIZED):
-                shutil.copyfile(ROOT / path, path)
+            self.reset_metadata()
 
     def test_both_build_references_preserved(self):
         self.set_plist(
@@ -89,7 +104,7 @@ class MetadataTests(unittest.TestCase):
             for value in ("1.0.4", "$(UNKNOWN)", "$(CURRENT_PROJECT_VERSION)" if
                           key == "CFBundleShortVersionString" else "$(MARKETING_VERSION)", "", 107):
                 with self.subTest(key=key, value=value):
-                    shutil.copyfile(ROOT / release.PLIST, release.PLIST)
+                    self.reset_metadata(release.PLIST)
                     self.set_plist(**{key: value})
                     with self.assertRaises(ValueError):
                         release.read_version()
@@ -98,7 +113,7 @@ class MetadataTests(unittest.TestCase):
         for key in release.SETTINGS:
             for replacement in (f"{key} = 1.0.4;", "", f'{key} = "$(UNKNOWN)";'):
                 with self.subTest(key=key, replacement=replacement):
-                    shutil.copyfile(ROOT / release.PROJECT, release.PROJECT)
+                    self.reset_metadata(release.PROJECT)
                     text = release.PROJECT.read_text()
                     release.PROJECT.write_text(text.replace(f"{key} = 1.0.7;", replacement, 1))
                     with self.assertRaises(ValueError):
@@ -125,7 +140,7 @@ class MetadataTests(unittest.TestCase):
 
     def test_localized_drift_rejected(self):
         for old in ('"1.0.7"', "version 1.0.7,"):
-            shutil.copyfile(ROOT / release.LOCALIZED, release.LOCALIZED)
+            self.reset_metadata(release.LOCALIZED)
             self.replace(release.LOCALIZED, old, old.replace("1.0.7", "1.0.1"))
             with self.assertRaisesRegex(ValueError, "Localized"):
                 release.read_version()
@@ -151,6 +166,49 @@ class MetadataTests(unittest.TestCase):
                 patch("sys.argv", ["release.py", "version"]), contextlib.redirect_stdout(StringIO()):
             release.main()
         self.assertEqual(output.read_text(), "version=1.0.7\ntag=v1.0.7\n")
+
+
+class LiveRepositoryTests(unittest.TestCase):
+    def setUp(self):
+        previous = Path.cwd()
+        os.chdir(ROOT)
+        self.addCleanup(os.chdir, previous)
+
+    def test_repository_metadata_consistent(self):
+        marketing = release.assignments(release.PROJECT.read_text(), "MARKETING_VERSION")
+        self.assertTrue(marketing)
+        expected = release.require_version(release.setting_value(marketing[0]))
+        self.assertEqual(release.read_version(), expected)
+
+    def test_regression_suite_passes_after_future_bump_in_copy(self):
+        before = {path: path.read_bytes() for path in METADATA_FIXTURES}
+        current = release.read_version()
+        with tempfile.TemporaryDirectory() as directory:
+            copied = Path(directory)
+            shutil.copytree(ROOT / ".github", copied / ".github",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            for path, content in before.items():
+                target = copied / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            environment = dict(os.environ, GITHUB_OUTPUT="", PYTHONDONTWRITEBYTECODE="1",
+                               PYTHONPATH=str(copied / ".github/scripts"))
+            bumped = subprocess.run(
+                [sys.executable, ".github/scripts/release.py", "bump", "major"],
+                cwd=copied, env=environment, text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            self.assertNotEqual(bumped, current)
+            release.require_version(bumped)
+            # Run every regression group and the live consistency check in the copy,
+            # excluding only this recursive copy-proof test.
+            result = subprocess.run(
+                [sys.executable, "-m", "unittest", "test_release.MetadataTests",
+                 "test_release.PublicationTests", "test_release.WorkflowTests",
+                 "test_release.LiveRepositoryTests.test_repository_metadata_consistent"],
+                cwd=copied, env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
 
 
 class PublicationTests(unittest.TestCase):
