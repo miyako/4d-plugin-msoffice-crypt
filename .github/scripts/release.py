@@ -1,13 +1,13 @@
 """Coordinated version metadata and fail-closed release publication."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import plistlib
 import re
 import subprocess
 import sys
-from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -113,6 +113,25 @@ def bump(mode):
     return new
 
 
+def release_api(path, payload=None):
+    request = Request(
+        f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        method="POST" if payload is not None else "GET",
+        headers={
+            "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urlopen(request, timeout=30) as response:
+        expected = 201 if payload is not None else 200
+        if response.status != expected:
+            raise RuntimeError(f"Unexpected GitHub API status: {response.status}; expected {expected}")
+        return json.load(response)
+
+
 def ensure_available(tag):
     result = subprocess.run(
         ["git", "ls-remote", "--exit-code", "--tags", "origin", f"refs/tags/{tag}"],
@@ -122,22 +141,23 @@ def ensure_available(tag):
         raise ValueError(f"Tag {tag} already exists; bump the version before building")
     if result.returncode != 2:
         raise RuntimeError(f"Cannot check remote tags: {result.stderr}")
-    request = Request(
-        f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}/releases/tags/{tag}",
-        headers={
-            "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    try:
-        with urlopen(request, timeout=30):
-            pass
-    except HTTPError as error:
-        if error.code == 404:
+    repository = release_api("")
+    if not isinstance(repository, dict) or repository.get("full_name") != os.environ["GITHUB_REPOSITORY"]:
+        raise ValueError("Cannot confirm repository access")
+    page = 1
+    while True:
+        releases = release_api(f"/releases?per_page=100&page={page}")
+        if not isinstance(releases, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("tag_name"), str)
+            or not item["tag_name"] or type(item.get("draft")) is not bool
+            for item in releases
+        ):
+            raise ValueError("Malformed GitHub releases listing")
+        if any(item["tag_name"] == tag for item in releases):
+            raise ValueError(f"Release {tag} already exists; refusing to replace it or its assets")
+        if len(releases) < 100:
             return
-        raise
-    raise ValueError(f"Release {tag} already exists; refusing to replace it or its assets")
+        page += 1
 
 
 def check_commit():
@@ -169,10 +189,28 @@ def publish(version, assets):
     ).split()
     if remote != [sha, f"refs/tags/{tag}"]:
         raise ValueError("Published tag does not point to the selected commit")
-    subprocess.run([
-        "gh", "release", "create", tag, "--verify-tag", "--target", sha,
-        "--title", tag, "--generate-notes", *assets,
-    ], check=True)
+    try:
+        created = release_api("/releases", {
+            "tag_name": tag,
+            "target_commitish": sha,
+            "name": tag,
+            "draft": False,
+            "prerelease": False,
+            "generate_release_notes": True,
+        })
+        if (not isinstance(created, dict) or type(created.get("id")) is not int
+                or created["id"] <= 0 or created.get("tag_name") != tag
+                or created.get("draft") is not False or created.get("prerelease") is not False):
+            raise ValueError("Malformed GitHub release creation response")
+        subprocess.run(["gh", "release", "upload", tag, *assets,
+                        "--repo", os.environ["GITHUB_REPOSITORY"]], check=True)
+    except (ValueError, RuntimeError, OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(
+            f"Publication of {tag} failed or its result is uncertain: {error}. "
+            "The pushed tag and any release/uploaded assets are retained; no rollback or retry was attempted. "
+            "Inspect the tag, published/draft releases and assets manually before recovery; "
+            "rerunning will fail closed. Do not overwrite or delete existing state automatically."
+        ) from error
 
 
 def main():
