@@ -1,3 +1,4 @@
 msoffice-crypt/test/userPreferences.*
 msoffice-crypt/build/*
 build/*
+vcpkg_installed/

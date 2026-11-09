@@ -1,0 +1,52 @@
+# Builds the Windows (x64) plugin on pull requests and fails if the .4DX
+# imports any non-system DLL. Does not package or publish anything.
+
+name: Windows build check
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_NAME: msoffice crypt
+  BASE_DIR: test
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: vcpkg-x64-windows-static-${{ hashFiles('vcpkg.json') }}
+
+      - name: install static OpenSSL (vcpkg)
+        shell: pwsh
+        env:
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}/vcpkg-cache
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install --triplet x64-windows-static
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: build x64
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "${{ env.BASE_DIR }}/Plugins/${{ env.PRODUCT_NAME }}.bundle"
+          msbuild "${{ env.PRODUCT_NAME }}.sln" /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 /m
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: verify windows dependencies
+        shell: pwsh
+        run: |
+          $product = "${{ env.PRODUCT_NAME }}"
+          ./.github/scripts/verify-windows-deps.ps1 -Dir "${{ env.BASE_DIR }}/Plugins/$product.bundle/Contents/Windows64" -Binary "$product.4DX"
