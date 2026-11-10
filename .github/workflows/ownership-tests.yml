@@ -1,0 +1,19 @@
+name: Ownership regressions
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ownership:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reproduce original leaks
+        run: python3 tests/test_ownership.py --baseline d31628a79ab963e000e0ad66874dab87b28f3ae5
+      - name: Check fixed helpers and SDK contracts
+        run: python3 tests/test_ownership.py

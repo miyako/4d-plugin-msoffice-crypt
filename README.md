@@ -26,6 +26,46 @@ Publication is serialized across branches; no branch-only publication restrictio
 
 Local release regression checks: `python3 -m unittest discover -s .github/scripts -p 'test_*.py'` and `actionlint`.
 
+## Native string ownership regressions
+
+On macOS, run `python3 tests/test_ownership.py`. This compiles the actual JSON
+helpers and the full, unchanged bundled SDK with ASan/UBSan, using a synthetic
+engine callback rather than a 4D installation. It builds only a temporary test
+executable: no bundle, signing, packaging, or release workflow is involved.
+SDK string/handle allocation and object/collection reference accounting replaces
+LSan, which is disabled on this platform.
+
+The four string setter overloads start with an Undefined variable before their
+single owning string handoff; creating an empty string variable first would lose
+that allocation when the SDK shallow setter overwrites it. Property getters clear
+their owning results after reading/copying, including mismatches. The collection
+getter instead hands its successful owning reference to its caller, which must
+eventually call `PA_DisposeCollection`.
+
+The same harness reproduces both original leaks with
+`python3 tests/test_ownership.py --baseline d31628a79ab963e000e0ad66874dab87b28f3ae5`.
+Coverage includes allocated/null empty strings, exact ASCII/BMP/supplementary text,
+replacement, independent results, mismatched owning property types, successful
+object/collection handoffs, and stringify result cleanup. SDK array checks cover
+borrowed copies, independent transfers, element zero, replacement/shrink/clear,
+and rejected type/index/null-data/null-string destinations.
+
+Audit scope at that baseline: both source and tracked bundle manifests declare
+Blob/Object inputs and an Object result; selectors 1 and 2 reach the shared
+options/status helpers. Both native projects compile the command implementation,
+JSON helpers, `C_BLOB`, `C_TEXT`, and the SDK. Tracked `ARRAY_TEXT` and `C_LONGINT`
+are excluded from both projects; there is no first-party `CPicture`, pointer
+wrapper, charset conversion, or asynchronous callback implementation. Third-party
+encryption/JSON/OpenSSL libraries and previously built binaries are not audited.
+The SDK files label themselves v14 (Flags.h v13), not a verified upstream release.
+
+This is synthetic macOS engine-boundary evidence, not actual 4D or Windows host
+certification. Array allocation/resize failure recovery is not certified: the
+bundled SDK updates the logical count even after failed handle growth, and the
+dormant wrapper has no capacity/error guard. Empty-picture initialization in the
+uncalled picture setter and undocumented output ownership in SDK-only
+`PA_GetPictureData`/`PA_GetApplicationFullPath` are not changed or certified.
+
 ---
 
 ## Requirements & platform notes
